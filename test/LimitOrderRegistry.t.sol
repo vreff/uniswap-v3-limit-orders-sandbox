@@ -85,6 +85,7 @@ contract LimitOrderRegistryTest is Test {
         poolFees[0] = 500;
 
         (bool upkeepNeeded, bytes memory performData) = registry.checkUpkeep(abi.encode(USDC_WETH_05_POOL));
+        assertFalse(upkeepNeeded, "Upkeep should not be needed.");
 
         uint256 swapAmount = 1_000e18;
         deal(address(WETH), address(this), swapAmount);
@@ -134,6 +135,57 @@ contract LimitOrderRegistryTest is Test {
         deal(address(WMATIC), address(this), 300_000 * 30e9);
         WMATIC.approve(address(registry), 300_000 * 30e9);
         registry.claimOrder(USDC_WETH_05_POOL, 2, address(this));
+    }
+
+    function testInconsistentOrderAcceptance() external {
+        deal(address(LINK), address(this), 10e18);
+        LINK.approve(address(registry), 10e18);
+
+        uint256 amount = 1_000e6 * 2;
+        deal(address(USDC), address(this), amount);
+
+        // Current tick 204332
+        // 204367
+        // Current block 16371089
+        USDC.approve(address(registry), amount);
+
+        // Create a first order that becomes center head.
+        registry.newOrder(USDC_WETH_05_POOL, 204920, uint96(amount / 2), true, 0);
+
+        // Create a sell order that becomes the center tail.
+        uint96 ethOrderAmount = 2_000e16;
+        deal(address(WETH), address(this), ethOrderAmount);
+        WETH.approve(address(registry), ethOrderAmount);
+        registry.newOrder(USDC_WETH_05_POOL, 200000, ethOrderAmount, false, 0);
+
+        // Assert that an upkeep is not currently needed, as all orders are OTM.
+        (bool upkeepNeeded, bytes memory performData) = registry.checkUpkeep(abi.encode(USDC_WETH_05_POOL));
+        assertFalse(upkeepNeeded, "Upkeep should not be needed.");
+
+        // Make a large order that shifts the tick.
+        address[] memory path = new address[](2);
+        path[0] = address(WETH);
+        path[1] = address(USDC);
+        uint24[] memory poolFees = new uint24[](1);
+        poolFees[0] = 500;
+        uint256 swapAmount = 1_000e18;
+        deal(address(WETH), address(this), swapAmount);
+        _swap(path, poolFees, swapAmount);
+
+        // Assert that an upkeep is needed due to the tick movement.
+        (upkeepNeeded, performData) = registry.checkUpkeep(abi.encode(USDC_WETH_05_POOL));
+        assertTrue(upkeepNeeded, "Upkeep should be needed.");
+
+        // Create a sell order that is even more OTM than the center tail. This attempted order succeeds.
+        deal(address(WETH), address(this), ethOrderAmount);
+        WETH.approve(address(registry), ethOrderAmount);
+        registry.newOrder(USDC_WETH_05_POOL, 190000, ethOrderAmount, false, 0);
+
+        // Create a sell order that is less OTM than the center tail. This attempted order fails.
+        deal(address(WETH), address(this), ethOrderAmount);
+        WETH.approve(address(registry), ethOrderAmount);
+        vm.expectRevert(abi.encodeWithSelector(LimitOrderRegistry.LimitOrderRegistry__CenterITM.selector));
+        registry.newOrder(USDC_WETH_05_POOL, 201000, ethOrderAmount, false, 0);
     }
 
     function testLinkedListCreation() external {
